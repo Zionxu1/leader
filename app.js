@@ -322,7 +322,9 @@
       '<b>为什么不能全自动？</b><br>' +
       'iOS 不允许任何第三方 App 读取微信、支付宝、银行 App 的通知或交易数据，也没有短信读取权限。' +
       '所以金额只能来自你的输入、截图文字识别，或者以后导入账单。<br><br>' +
-      '<b>想少动手：</b>把支付成功页截图 → 记一笔 → 「截图识字」，通常 5 秒完成一笔。' +
+      '<b>想最省事：</b>用「快捷指令」把截图转成文字（README 里的「姿势 B」），' +
+      '再在 App 里点「粘贴识别」，完全不用等语言包。<br><br>' +
+      '截图识字第一次要下载语言包（约 10MB），之后每次约 2–4 秒。' +
       '</div>' +
 
       '<div class="sec-title">安装到桌面</div>' +
@@ -609,51 +611,86 @@
     });
   }
 
-  function ocrImage(file) {
-    var chain = Promise.resolve();
-    if (!window.Tesseract) {
-      drive(0, '正在加载文字识别引擎…');
-      chain = loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
-    }
-    return chain.then(function () {
-      drive(0.15, '正在加载中文语言包…');
-      return window.Tesseract.createWorker('chi_sim+eng', 1, {
-        logger: function (m) {
-          if (m.status === 'recognizing text') drive(0.5 + m.progress * 0.5, '正在识别文字 ' + Math.round(m.progress * 100) + '%');
-          else if (m.progress != null) drive(0.15 + m.progress * 0.3, '正在加载中文语言包…');
+  /* 只裁掉状态栏和底部，缩小到 1100px 宽：更快，也少读到无关文字 */
+  function prepareImage(file) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var top = Math.round(img.height * 0.06);
+          var bottom = Math.round(img.height * 0.02);
+          var h = Math.max(1, img.height - top - bottom);
+          var scale = Math.min(1, 1100 / img.width);
+          var c = document.createElement('canvas');
+          c.width = Math.round(img.width * scale);
+          c.height = Math.round(h * scale);
+          var ctx = c.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, c.width, c.height);
+          ctx.drawImage(img, 0, top, img.width, h, 0, 0, c.width, c.height);
+          URL.revokeObjectURL(url);
+          resolve(c);
+        } catch (e) {
+          URL.revokeObjectURL(url);
+          reject(e);
         }
-      });
-    }).then(function (worker) {
-      drive(0.5, '正在识别文字…');
-      return worker.recognize(file).then(function (res) {
-        var text = res && res.data ? res.data.text : '';
-        worker.terminate();
-        return text;
-      }, function (err) {
-        worker.terminate();
-        throw err;
-      });
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        reject(new Error('image load failed'));
+      };
+      img.src = url;
     });
   }
 
-  function drive(ratio, text) {
-    if (text) showProgress(text);
+  /* 语言包只加载一次，之后复用同一个 worker */
+  var ocrWorker = null;
+
+  async function ensureOcrWorker() {
+    if (ocrWorker) return ocrWorker;
+    if (!window.Tesseract) {
+      showProgress('正在加载识别引擎…');
+      await withTimeout(
+        loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'),
+        60000, 'engine timeout'
+      );
+    }
+    var firstTime = !ocrWorker;
+    if (firstTime) {
+      showProgress('首次使用：正在下载中文语言包（约 10MB，只需一次）…');
+    }
+    ocrWorker = await window.Tesseract.createWorker('chi_sim', 1, {
+      logger: function (m) {
+        if (m.status === 'recognizing text') showProgress('识别中 ' + Math.round(m.progress * 100) + '%');
+      }
+    });
+    return ocrWorker;
   }
 
-  function startOcr(file) {
+  async function startOcr(file) {
     if (!file) return;
     openSheet('#pasteSheet');
     $('#pasteText').value = '';
-    showProgress('正在加载文字识别引擎…');
-    withTimeout(ocrImage(file), 180000, '识别超时').then(function (text) {
+    showProgress('正在准备图片…');
+    try {
+      var canvas = await prepareImage(file);
+      var worker = await ensureOcrWorker();
+      showProgress('识别中…');
+      var res = await withTimeout(worker.recognize(canvas), 120000, 'recognize timeout');
       hideProgress();
+      var text = res && res.data ? res.data.text : '';
       $('#pasteText').value = text;
-      if (!text || text.replace(/\s/g, '').length < 2) { toast('没识别出文字，试试裁掉截图多余的部分'); return; }
+      if (!text || text.replace(/\s/g, '').length < 2) { toast('没识别出文字，换个清楚点的截图'); return; }
       doParse(text);
-    }).catch(function () {
+    } catch (e) {
       hideProgress();
-      toast('截图识别失败（可能网络或语言包加载失败），可以改用「粘贴识别」');
-    });
+      if (ocrWorker) {
+        try { ocrWorker.terminate(); } catch (x) { }
+        ocrWorker = null;
+      }
+      toast('截图识别失败，可以改用「粘贴识别」或快捷指令');
+    }
   }
 
   /* ---------------- 导入导出 ---------------- */

@@ -351,12 +351,25 @@
       if (mm) out.amount = round2(parseFloat(mm[1]));
     }
 
-    /* 渠道 */
-    if (/微信|零钱|理财通/.test(text)) out.channel = 'wechat';
-    else if (/支付宝|花呗|余额宝|借呗/.test(text)) out.channel = 'alipay';
-    else if (/云闪付|银联/.test(text)) out.channel = 'other';
-    else if (/银行|储蓄卡|信用卡|尾号|借记卡/.test(text)) out.channel = 'bankcard';
-    else if (/现金/.test(text)) out.channel = 'cash';
+    /* 渠道：先看「支付方式 / 付款方式」这一行的值，比全文关键词更准 */
+    var payMatch = text.match(/(?:支付方式|付款方式|收\/付款方式)\s*[:：]?\s*([^\n]{1,24})/);
+    if (payMatch) {
+      var pw = payMatch[1];
+      if (/银行|储蓄卡|信用卡|借记卡/.test(pw)) out.channel = 'bankcard';
+      else if (/零钱/.test(pw)) out.channel = 'wechat';
+      else if (/余额宝|花呗|借呗|余额/.test(pw)) out.channel = 'alipay';
+      else if (/云闪付|银联/.test(pw)) out.channel = 'other';
+      else if (/微信/.test(pw)) out.channel = 'wechat';
+      else if (/支付宝/.test(pw)) out.channel = 'alipay';
+      else if (/现金/.test(pw)) out.channel = 'cash';
+    }
+    if (!out.channel) {
+      if (/微信|零钱|理财通/.test(text)) out.channel = 'wechat';
+      else if (/支付宝|花呗|余额宝|借呗/.test(text)) out.channel = 'alipay';
+      else if (/云闪付|银联/.test(text)) out.channel = 'other';
+      else if (/银行|储蓄卡|信用卡|尾号|借记卡/.test(text)) out.channel = 'bankcard';
+      else if (/现金/.test(text)) out.channel = 'cash';
+    }
 
     /* 收支 */
     var incomeHit = /(收到|收款|到账|入账|退款|收入|红包)/.test(text);
@@ -390,26 +403,46 @@
     out.time = iso;
 
     /* 商户 */
-    t = text.match(/(?:收款方|商户名称|商户|付款给|收款人|对方|收款账户|收款单位)\s*[:：]\s*([^\n]{1,40})/);
+    t = text.match(/(?:收款方|商户名称|商户名|商户|付款给|收款人|对方|收款账户|收款单位|交易对方)\s*[:：]\s*([^\n]{1,40})/);
     if (t) out.merchant = cleanMerchant(t[1]);
     if (!out.merchant) {
       var lines = text.split('\n').map(function (l) { return l.trim(); }).filter(Boolean);
       var amountStr = out.amount != null ? String(out.amount) : '';
-      var candidates = [];
-      for (var k = 0; k < lines.length; k++) {
-        var line = lines[k];
-        if (line.length < 2 || line.length > 30) continue;
-        if (NOISE.test(line)) continue;
-        if (/^[\d\s.,:：¥￥+\-%]+$/.test(line)) continue;
-        if (line.indexOf('¥') >= 0 || line.indexOf('￥') >= 0) continue;
-        if (amountStr && line.replace(/[^\d.]/g, '') === amountStr) continue;
-        if (/^\d{4}\s*[年\-\/.]\s*\d{1,2}/.test(line)) continue;
-        candidates.push(line);
+
+      /* 找到金额所在行，商户名通常紧跟在金额下面 */
+      var amountLine = -1;
+      if (amountStr) {
+        var compactAmt = amountStr.replace('.', '');
+        for (var q = 0; q < lines.length; q++) {
+          var dg = lines[q].replace(/[^\d.]/g, '');
+          if (!dg) continue;
+          if (dg.indexOf(amountStr) >= 0 || dg.replace('.', '').indexOf(compactAmt) >= 0) { amountLine = q; break; }
+        }
       }
+
+      var isName = function (line) {
+        if (!line) return false;
+        if (line.length < 2 || line.length > 24) return false;
+        if (NOISE.test(line)) return false;
+        if (/^[\d\s.,:：/\\|+\-%¥￥]+$/.test(line)) return false;
+        if (/^\d{1,2}\s*[:：]\s*\d{2}/.test(line)) return false;
+        if (/^\d{4}\s*[年\-\/.]\s*\d{1,2}/.test(line)) return false;
+        if (/(4G|5G|WiFi|WIFI|LTE|中国联通|中国移动|中国电信|信号|电量|电池)/i.test(line)) return false;
+        if (/(单号|订单|状态|方式|时间|机构|备注|详情|编号|金额|余额)/.test(line)) return false;
+        if (!/[\u4e00-\u9fa5A-Za-z]/.test(line)) return false;
+        return true;
+      };
+
       var picked = '';
-      for (var c = 0; c < candidates.length; c++) {
-        if (/[\u4e00-\u9fa5A-Za-z]/.test(candidates[c])) { picked = candidates[c]; break; }
-      }
+      var scan = function (from, to) {
+        for (var k = from; k < to; k++) {
+          if (isName(lines[k])) { picked = lines[k]; return true; }
+        }
+        return false;
+      };
+
+      if (amountLine >= 0) scan(amountLine + 1, Math.min(lines.length, amountLine + 6));
+      if (!picked) scan(0, lines.length);
       out.merchant = cleanMerchant(picked);
     }
     return out;
