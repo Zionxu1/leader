@@ -43,7 +43,8 @@
     var def = {
       lastChannel: { expense: 'wechat', income: 'bankcard' },
       lastCat: { expense: 'food', income: 'salary' },
-      lastExport: 0
+      lastExport: 0,
+      catRules: {}
     };
     try {
       var raw = localStorage.getItem(LS_PREFS);
@@ -52,6 +53,7 @@
       p.lastChannel = Object.assign({}, def.lastChannel, p.lastChannel || {});
       p.lastCat = Object.assign({}, def.lastCat, p.lastCat || {});
       p.lastExport = p.lastExport || 0;
+      p.catRules = p.catRules && typeof p.catRules === 'object' ? p.catRules : {};
       return p;
     } catch (e) { return def; }
   }
@@ -96,6 +98,18 @@
     if (p.get('demo') === '1' && !entries.length) {
       entries = demoData();
       return;
+    }
+
+    var txt = p.get('txt');
+    if (txt) {
+      var parsed = C.parsePaymentText(txt);
+      if (parsed.amount > 0) {
+        var dt = newDraft(null);
+        applyParseToDraft(dt, parsed);
+        setTimeout(function () { showEntry(dt); }, 60);
+        try { history.replaceState(null, '', location.pathname); } catch (e) { }
+        return;
+      }
     }
 
     var amt = p.get('add') || p.get('amount');
@@ -505,6 +519,7 @@
 
     prefs.lastChannel[d.type] = d.channel;
     prefs.lastCat[d.type] = d.category;
+    if (merchant) learnCategory(merchant, entry.type, entry.category);
     savePrefs();
 
     if (entry.time.slice(0, 7) !== state.month) {
@@ -557,7 +572,57 @@
     hideProgress();
     var ta = $('#pasteText');
     ta.value = '';
-    setTimeout(function () { ta.focus(); }, 320);
+    setTimeout(function () {
+      if (!$('#pasteSheet').classList.contains('open')) return;
+      if (!ta.value) ta.focus();
+    }, 320);
+
+    /* 在用户点击的手势里直接读剪贴板，省一步 */
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(function (t) {
+        if (!t || ta.value) return;
+        if (!/(支付|付款|交易|收款|¥|￥|元)/.test(t)) return;
+        ta.value = t;
+        doParse(t);
+      }).catch(function () { });
+    }
+  }
+
+  function applyParseToDraft(d, r) {
+    d.type = r.type;
+    d.amountStr = String(r.amount);
+    if (r.merchant) {
+      d.merchant = r.merchant;
+      var guess = categoryFor(r.merchant, r.type);
+      if (guess !== 'other') d.category = guess;
+    }
+    if (r.channel) d.channel = r.channel;
+    if (r.time) d.time = r.time;
+    d.source = 'paste';
+    return d;
+  }
+
+  /* 商户 → 分类的记忆：你手动改过一次，以后同名商户自动用你的选择 */
+  function categoryFor(merchant, type) {
+    var key = String(merchant || '').trim();
+    if (key && prefs.catRules && prefs.catRules[key]) {
+      var id = prefs.catRules[key];
+      var list = C.catsOf(type);
+      for (var i = 0; i < list.length; i++) if (list[i].id === id) return id;
+    }
+    return C.guessCategory(key, type);
+  }
+
+  function learnCategory(merchant, type, category) {
+    var key = String(merchant || '').trim();
+    if (!key) return;
+    var auto = C.guessCategory(key, type);
+    if (auto !== category) prefs.catRules[key] = category;
+    else if (prefs.catRules[key]) delete prefs.catRules[key];
+    var keys = Object.keys(prefs.catRules);
+    if (keys.length > 300) {
+      keys.slice(0, keys.length - 300).forEach(function (k) { delete prefs.catRules[k]; });
+    }
   }
 
   function doParse(text) {
@@ -566,17 +631,7 @@
       toast('没识别出金额，检查一下文字是否完整');
       return false;
     }
-    var d = state.draft || newDraft(null);
-    d.type = r.type;
-    d.amountStr = String(r.amount);
-    if (r.merchant) {
-      d.merchant = r.merchant;
-      var guess = C.guessCategory(r.merchant, r.type);
-      if (guess !== 'other') d.category = guess;
-    }
-    if (r.channel) d.channel = r.channel;
-    if (r.time) d.time = r.time;
-    d.source = 'paste';
+    var d = applyParseToDraft(state.draft || newDraft(null), r);
 
     paintEntry();
     closeSheet('#pasteSheet');
@@ -588,6 +643,8 @@
   function showProgress(t) {
     $('#progressText').textContent = t || '识别中…';
     $('#pasteProgress').classList.add('show');
+    var bp = $('#batchProgress');
+    if (bp) bp.textContent = t;
   }
 
   function hideProgress() {
@@ -691,6 +748,148 @@
       }
       toast('截图识别失败，可以改用「粘贴识别」或快捷指令');
     }
+  }
+
+  /* ---------------- 批量识别 ---------------- */
+
+  var batchItems = [];
+
+  function startBatch(files) {
+    batchItems = [];
+    openSheet('#batchSheet');
+    $('#batchTitle').textContent = '识别截图';
+    $('#batchSaveWrap').style.display = 'none';
+    $('#batchBody').innerHTML = '<div class="batch-summary" id="batchProgress">准备中…</div>';
+    runBatch(files);
+  }
+
+  async function runBatch(files) {
+    var worker;
+    try {
+      worker = await ensureOcrWorker();
+    } catch (e) {
+      $('#batchBody').innerHTML = '<div class="batch-summary">识别引擎加载失败，检查网络后重试</div>';
+      return;
+    }
+
+    for (var i = 0; i < files.length; i++) {
+      if (!$('#batchSheet').classList.contains('open')) return;
+      var label = $('#batchProgress');
+      if (label) label.textContent = '正在识别 ' + (i + 1) + ' / ' + files.length + '…';
+      try {
+        var canvas = await prepareImage(files[i]);
+        var res = await withTimeout(worker.recognize(canvas), 60000, 'timeout');
+        var text = res && res.data ? res.data.text : '';
+        var p = C.parsePaymentText(text);
+        batchItems.push({ ok: p.amount > 0, parsed: p, text: text, selected: false, dup: false, category: 'other' });
+      } catch (e) {
+        batchItems.push({ ok: false, parsed: null, text: '', selected: false, dup: false, category: 'other' });
+      }
+    }
+    finalizeBatch();
+  }
+
+  function finalizeBatch() {
+    var seen = entries.slice();
+    batchItems.forEach(function (b) {
+      if (!b.ok) return;
+      var p = b.parsed;
+      var cand = {
+        type: p.type,
+        amount: p.amount,
+        channel: p.channel || 'other',
+        time: p.time || C.nowLocalIso()
+      };
+      b.dup = !!C.findDuplicate(seen, cand, 10);
+      b.category = categoryFor(p.merchant, p.type);
+      b.selected = !b.dup;
+      if (!b.dup) seen.push(C.normalizeEntry(cand));
+    });
+    renderBatch();
+  }
+
+  function renderBatch() {
+    var okCount = 0, dupCount = 0, failCount = 0;
+    batchItems.forEach(function (b) {
+      if (!b.ok) failCount++;
+      else { okCount++; if (b.dup) dupCount++; }
+    });
+
+    var html = '<div class="batch-summary">识别成功 ' + okCount + ' 张' +
+      (dupCount ? '，其中 ' + dupCount + ' 笔已记过（已取消勾选）' : '') +
+      (failCount ? '，' + failCount + ' 张没识别出金额' : '') + '</div>';
+
+    html += '<div class="batch-list">' + batchItems.map(function (b, i) {
+      if (!b.ok) {
+        return '<div class="batch-row disabled"><span class="bcheck">!</span>' +
+          '<span class="bmeta"><span class="t">没识别出金额</span>' +
+          '<span class="s">这张可以用「粘贴识别」或手动记</span></span></div>';
+      }
+      var p = b.parsed;
+      var cat = C.catOf(p.type, b.category);
+      var ch = C.channelOf(p.channel || 'other');
+      var iso = p.time || C.nowLocalIso();
+      var sign = p.type === 'income' ? '+' : '−';
+      return '<button class="batch-row ' + (b.selected ? 'on' : 'off') + '" data-act="batch-toggle" data-i="' + i + '">' +
+        '<span class="bcheck">✓</span>' +
+        '<span class="bmeta">' +
+        '<span class="t">' + esc(p.merchant || cat.name) + (b.dup ? ' · 已记过' : '') + '</span>' +
+        '<span class="s">' + esc(cat.name) + ' · ' + esc(ch.name) + ' · ' + esc(C.dateLabel(iso)) + ' ' + esc(C.timeLabel(iso)) + '</span>' +
+        '</span>' +
+        '<span class="bamt">' + sign + '¥' + C.money(p.amount) + '</span></button>';
+    }).join('') + '</div>';
+
+    $('#batchBody').innerHTML = html;
+    updateBatchButton();
+  }
+
+  function updateBatchButton() {
+    var n = batchItems.filter(function (b) { return b.ok && b.selected; }).length;
+    $('#batchSaveWrap').style.display = 'block';
+    $('#btnBatchImport').textContent = n ? '导入 ' + n + ' 笔' : '没有选中';
+    $('#btnBatchImport').disabled = !n;
+  }
+
+  function toggleBatch(i) {
+    var b = batchItems[i];
+    if (!b || !b.ok) return;
+    b.selected = !b.selected;
+    renderBatch();
+  }
+
+  function importBatch() {
+    var chosen = batchItems.filter(function (b) { return b.ok && b.selected; });
+    if (!chosen.length) return;
+    var latest = '';
+    chosen.forEach(function (b) {
+      var p = b.parsed;
+      var e = C.normalizeEntry({
+        type: p.type,
+        amount: p.amount,
+        category: b.category,
+        channel: p.channel || 'other',
+        merchant: p.merchant,
+        time: p.time || C.nowLocalIso(),
+        source: 'ocr'
+      });
+      entries.push(e);
+      var k = e.time.slice(0, 7);
+      if (k > latest) latest = k;
+    });
+    entries.sort(function (a, b) { return b.time.localeCompare(a.time); });
+    persist();
+
+    state.view = 'ledger';
+    state.q = '';
+    var si = $('#searchInput');
+    if (si) si.value = '';
+    $('#searchbar').classList.remove('show');
+    if (latest) state.month = latest;
+
+    closeSheet('#batchSheet');
+    batchItems = [];
+    toast('已导入 ' + chosen.length + ' 笔');
+    render();
   }
 
   /* ---------------- 导入导出 ---------------- */
@@ -976,6 +1175,20 @@
 
     $('#fab').addEventListener('click', openNewEntry);
 
+    $('#btnClip').addEventListener('click', function () {
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        toast('这个环境读不了剪贴板，请用「粘贴识别」');
+        return;
+      }
+      navigator.clipboard.readText().then(function (t) {
+        if (!t) { toast('剪贴板是空的'); return; }
+        if (C.parsePaymentText(t).amount > 0) { doParse(t); return; }
+        openPaste();
+      }).catch(function () {
+        toast('读取剪贴板被拒绝，请用「粘贴识别」');
+      });
+    });
+
     $$('#tabbar .tab').forEach(function (b) {
       b.addEventListener('click', function () {
         state.view = b.getAttribute('data-view');
@@ -1025,9 +1238,11 @@
     $('#btnPaste').addEventListener('click', openPaste);
     $('#btnScan').addEventListener('click', function () { $('#ocrFile').click(); });
     $('#ocrFile').addEventListener('change', function () {
-      var f = this.files && this.files[0];
+      var files = Array.prototype.slice.call(this.files || []);
       this.value = '';
-      if (f) startOcr(f);
+      if (!files.length) return;
+      if (files.length === 1) startOcr(files[0]);
+      else startBatch(files);
     });
 
     $('#btnReadClip').addEventListener('click', function () {
@@ -1102,6 +1317,7 @@
     });
 
     $('#btnDoImport').addEventListener('click', doImport);
+    $('#btnBatchImport').addEventListener('click', importBatch);
 
     $('#importFile').addEventListener('change', function () {
       var f = this.files && this.files[0];
@@ -1121,6 +1337,7 @@
       else if (act === 'export-csv') exportCSV();
       else if (act === 'import') $('#importFile').click();
       else if (act === 'import-bill') $('#billFile').click();
+      else if (act === 'batch-toggle') toggleBatch(parseInt(t.getAttribute('data-i'), 10));
       else if (act === 'clear') clearAll();
     });
 

@@ -26,7 +26,10 @@
       <button id="monthLabel" title="点一下回到本月">2026年10月</button>
       <button class="arrow" id="nextMonth" aria-label="下个月">›</button>
     </div>
-    <button class="icon-btn" id="btnSearch" aria-label="搜索">🔍</button>
+    <div class="top-actions">
+      <button class="icon-btn" id="btnClip" aria-label="从剪贴板导入">📋</button>
+      <button class="icon-btn" id="btnSearch" aria-label="搜索">🔍</button>
+    </div>
   </header>
   <div class="searchbar" id="searchbar">
     <input id="searchInput" type="search" placeholder="搜索商户 / 备注 / 分类" enterkeyhint="search">
@@ -129,6 +132,19 @@
   </div>
 </section>
 
+<!-- ============ 批量识别结果 ============ -->
+<section class="sheet" id="batchSheet" aria-hidden="true">
+  <div class="grip"></div>
+  <div class="sheet-head">
+    <h2 id="batchTitle">识别截图</h2>
+    <button class="close" data-close>取消</button>
+  </div>
+  <div id="batchBody"></div>
+  <div class="save-wrap" id="batchSaveWrap" style="display:none">
+    <button class="btn primary" id="btnBatchImport">导入</button>
+  </div>
+</section>
+
 <div class="toast" id="toast"></div>
 
 <!-- ============ 账单导入 ============ -->
@@ -159,7 +175,7 @@
   </div>
 </div>
 
-<input type="file" id="ocrFile" accept="image/*" hidden>
+<input type="file" id="ocrFile" accept="image/*" multiple hidden>
 <input type="file" id="importFile" accept=".json,application/json" hidden>
 <input type="file" id="billFile" accept=".csv,text/csv,text/plain" hidden>
 
