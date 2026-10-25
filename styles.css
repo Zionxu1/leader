@@ -797,6 +797,24 @@ input[type="datetime-local"] {
 .bmeta .s { font-size: 12px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bamt { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
+/* ============ 切月动画 ============ */
+@keyframes viewInNext {
+  from { opacity: .35; transform: translateX(26px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes viewInPrev {
+  from { opacity: .35; transform: translateX(-26px); }
+  to { opacity: 1; transform: none; }
+}
+
+#view.anim-next { animation: viewInNext .24s cubic-bezier(.2, .8, .2, 1); }
+#view.anim-prev { animation: viewInPrev .24s cubic-bezier(.2, .8, .2, 1); }
+
+@media (prefers-reduced-motion: reduce) {
+  #view.anim-next, #view.anim-prev { animation: none; }
+}
+
 /* toast */
 .toast {
   position: fixed;

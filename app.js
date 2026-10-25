@@ -82,8 +82,17 @@
     bindEvents();
     render();
     registerSW();
+    maybeShowSwipeHint();
     if (!storeOk) toast('浏览器禁用了本地存储，数据可能无法保存');
   });
+
+  function maybeShowSwipeHint() {
+    try {
+      if (localStorage.getItem('ledger.v1.hint.swipe')) return;
+      localStorage.setItem('ledger.v1.hint.swipe', '1');
+    } catch (e) { return; }
+    setTimeout(function () { toast('小提示：左右滑动屏幕可以切换月份'); }, 1500);
+  }
 
   function registerSW() {
     if (!('serviceWorker' in navigator)) return;
@@ -144,6 +153,23 @@
     });
     $('#fab').classList.toggle('show', state.view === 'ledger');
     $('#btnSearch').classList.toggle('on', !!state.q);
+  }
+
+  var animTimer = null;
+
+  function switchMonth(delta) {
+    if (!delta || state.view === 'settings') return;
+    state.month = C.shiftMonth(state.month, delta);
+    var v = $('#view');
+    v.classList.remove('anim-next', 'anim-prev');
+    void v.offsetWidth;
+    v.classList.add(delta > 0 ? 'anim-next' : 'anim-prev');
+    clearTimeout(animTimer);
+    animTimer = setTimeout(function () {
+      v.classList.remove('anim-next', 'anim-prev');
+    }, 320);
+    render();
+    if (navigator.vibrate) { try { navigator.vibrate(8); } catch (e) { } }
   }
 
   function visibleEntries(q) {
@@ -1173,8 +1199,8 @@
   /* ---------------- 事件 ---------------- */
 
   function bindEvents() {
-    $('#prevMonth').addEventListener('click', function () { state.month = C.shiftMonth(state.month, -1); render(); });
-    $('#nextMonth').addEventListener('click', function () { state.month = C.shiftMonth(state.month, 1); render(); });
+    $('#prevMonth').addEventListener('click', function () { switchMonth(-1); });
+    $('#nextMonth').addEventListener('click', function () { switchMonth(1); });
     $('#monthLabel').addEventListener('click', function () {
       var cur = C.currentMonthKey();
       if (state.month === cur) { toast(C.monthLabel(cur)); return; }
@@ -1226,6 +1252,35 @@
       closeSheet(openSheets[openSheets.length - 1]);
       if (!openSheets.length && state.draft && !state.draft.editing) state.draft = null;
     });
+
+    /* 左右滑动切换月份 */
+    var touchStart = null;
+    var viewEl = $('#view');
+
+    viewEl.addEventListener('touchstart', function (e) {
+      touchStart = null;
+      if (e.touches.length !== 1) return;
+      if (state.view === 'settings') return;
+      if (openSheets.length) return;
+      if (e.touches[0].clientX < 24) return; /* 避开 iOS 边缘返回手势 */
+      touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
+    }, { passive: true });
+
+    viewEl.addEventListener('touchcancel', function () { touchStart = null; }, { passive: true });
+
+    viewEl.addEventListener('touchend', function (e) {
+      if (!touchStart) return;
+      var st = touchStart;
+      touchStart = null;
+      var t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      var dx = t.clientX - st.x;
+      var dy = t.clientY - st.y;
+      if (Date.now() - st.t > 900) return;
+      if (Math.abs(dx) < 55) return;
+      if (Math.abs(dx) < Math.abs(dy) * 1.6) return;
+      switchMonth(dx < 0 ? 1 : -1);
+    }, { passive: true });
 
     $$('[data-close]').forEach(function (b) {
       b.addEventListener('click', function () {
