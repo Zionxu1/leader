@@ -1,0 +1,18 @@
+{
+  "name": "月光账本",
+  "short_name": "账本",
+  "description": "本地优先的个人记账本：截图识字、快捷记账、月度报表。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f2f2f7",
+  "theme_color": "#0a84ff",
+  "lang": "zh-CN",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

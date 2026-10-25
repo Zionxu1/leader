@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<title>月光账本</title>
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="账本">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-180.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="app">
+  <header class="topbar" id="topbar">
+    <div class="top-title">设置</div>
+    <div class="month-nav">
+      <button class="arrow" id="prevMonth" aria-label="上个月">‹</button>
+      <button id="monthLabel" title="点一下回到本月">2026年10月</button>
+      <button class="arrow" id="nextMonth" aria-label="下个月">›</button>
+    </div>
+    <button class="icon-btn" id="btnSearch" aria-label="搜索">🔍</button>
+  </header>
+  <div class="searchbar" id="searchbar">
+    <input id="searchInput" type="search" placeholder="搜索商户 / 备注 / 分类" enterkeyhint="search">
+  </div>
+  <main id="view"></main>
+</div>
+
+<button class="fab" id="fab" aria-label="记一笔">＋</button>
+
+<nav class="tabbar" id="tabbar">
+  <button class="tab active" data-view="ledger"><span class="ti">📒</span><span>账本</span></button>
+  <button class="tab" data-view="report"><span class="ti">📊</span><span>报表</span></button>
+  <button class="tab" data-view="settings"><span class="ti">⚙️</span><span>设置</span></button>
+</nav>
+
+<div class="backdrop" id="backdrop"></div>
+
+<!-- ============ 记账面板 ============ -->
+<section class="sheet" id="entrySheet" aria-hidden="true">
+  <div class="grip"></div>
+  <div class="sheet-head">
+    <h2 id="entryTitle">记一笔</h2>
+    <button class="close" data-close>取消</button>
+  </div>
+
+  <div class="seg" id="typeSeg">
+    <button data-type="expense" class="active">支出</button>
+    <button data-type="income">收入</button>
+  </div>
+
+  <div class="amount-box">
+    <div class="amount-val" id="amountVal"><span class="cur">¥</span>0</div>
+    <div class="amount-side" id="amountSide"></div>
+  </div>
+
+  <div class="keypad" id="keypad">
+    <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+    <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+    <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+    <button data-k=".">.</button><button data-k="0">0</button><button data-k="del" class="del">⌫</button>
+  </div>
+
+  <div class="quick-ops">
+    <button class="op" id="btnScan">📷 截图识字</button>
+    <button class="op" id="btnPaste">📋 粘贴识别</button>
+    <button class="op" id="btnNow">🕐 现在</button>
+  </div>
+
+  <div class="field" style="margin-top:10px">
+    <input id="merchantInput" type="text" placeholder="商户 / 备注（可留空）" maxlength="60" enterkeyhint="done" autocomplete="off">
+  </div>
+
+  <div class="sec-title">分类</div>
+  <div class="chips" id="cats"></div>
+
+  <div class="sec-title">支付方式</div>
+  <div class="chips channels" id="channels"></div>
+
+  <div class="field field-row" style="margin-top:12px">
+    <span class="lab">时间</span>
+    <input id="timeInput" type="datetime-local">
+  </div>
+
+  <div class="save-wrap">
+    <button class="btn primary" id="saveBtn">保存</button>
+  </div>
+</section>
+
+<!-- ============ 粘贴识别 ============ -->
+<section class="sheet" id="pasteSheet" aria-hidden="true">
+  <div class="grip"></div>
+  <div class="sheet-head">
+    <h2>识别</h2>
+    <button class="close" data-close>取消</button>
+  </div>
+  <textarea id="pasteText" placeholder="把支付结果页的文字粘贴到这里（长按输入框 → 粘贴）。&#10;&#10;也可以用「快捷指令」对截图做文字识别后，把结果复制过来。"></textarea>
+  <div class="paste-tip">
+    · 支持微信、支付宝、银行短信、银行 App 的交易文字<br>
+    · 只在本机解析，不会上传任何内容
+  </div>
+  <div class="progress" id="pasteProgress">
+    <span class="spinner"></span><span id="progressText">识别中…</span>
+  </div>
+  <button class="btn ghost" id="btnReadClip">📋 读取剪贴板</button>
+  <button class="btn primary" id="btnParse">识别并填入</button>
+</section>
+
+<!-- ============ 详情 ============ -->
+<section class="sheet" id="detailSheet" aria-hidden="true">
+  <div class="grip"></div>
+  <div class="sheet-head">
+    <h2>这笔账</h2>
+    <button class="close" data-close>关闭</button>
+  </div>
+  <div id="detailBody"></div>
+  <div style="margin-top:16px">
+    <button class="btn ghost" id="btnEditEntry">编辑</button>
+    <button class="btn danger" id="btnDeleteEntry">删除这笔</button>
+  </div>
+</section>
+
+<div class="toast" id="toast"></div>
+<input type="file" id="ocrFile" accept="image/*" hidden>
+<input type="file" id="importFile" accept=".json,application/json" hidden>
+
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
