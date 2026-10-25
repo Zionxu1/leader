@@ -285,7 +285,7 @@
 
   var CAT_RULES = [
     ['transport', /(滴滴|曹操|T3|高德|打车|出租车|地铁|公交|轻轨|高铁|火车|12306|航空|机票|加油|停车|单车|哈啰|青桔|ETC|高速|过路|车费|船票|携程|去哪儿)/],
-    ['food', /(餐|饭|食|粉|面|粥|火锅|烧烤|咖啡|奶茶|茶饮|星巴克|瑞幸|库迪|麦当劳|肯德基|必胜客|汉堡|美团|饿了么|外卖|便利|超市|水果|生鲜|菜场|食堂|快餐|甜品|蛋糕|烘焙|酒|零食|喜茶|蜜雪)/],
+    ['food', /(餐|饭|食|粉|面|粥|火锅|烧烤|咖啡|奶茶|茶饮|星巴克|瑞幸|库迪|麦当劳|肯德基|必胜客|汉堡|美团|饿了么|外卖|便利|超市|盒马|水果|生鲜|鲜生|菜场|食堂|快餐|甜品|蛋糕|烘焙|酒|零食|喜茶|蜜雪)/],
     ['shopping', /(淘宝|天猫|京东|拼多多|唯品会|商城|专卖|服饰|服装|鞋|箱包|优衣库|无印|宜家|数码|家电|商场|百货|旗舰店|旗舰)/],
     ['daily', /(日用|洗衣|清洁|纸巾|五金|家居|理发|美发|剪发|快递|洗衣)/],
     ['fun', /(电影|影院|游戏|Steam|KTV|酒吧|演出|门票|景区|旅游|健身|运动|会员|爱奇艺|腾讯视频|网易云|Spotify|B站|哔哩)/],
@@ -415,6 +415,114 @@
     return out;
   }
 
+  /* ---------- 账单 CSV 解析（微信 / 支付宝导出） ---------- */
+
+  function parseCSV(text) {
+    var s = String(text == null ? '' : text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    var rows = [], row = [], field = '', inQuote = false, i = 0;
+    while (i < s.length) {
+      var ch = s.charAt(i);
+      if (inQuote) {
+        if (ch === '"') {
+          if (s.charAt(i + 1) === '"') { field += '"'; i += 2; continue; }
+          inQuote = false; i++; continue;
+        }
+        field += ch; i++; continue;
+      }
+      if (ch === '"') { inQuote = true; i++; continue; }
+      if (ch === ',') { row.push(field); field = ''; i++; continue; }
+      if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+      field += ch; i++;
+    }
+    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+    return rows;
+  }
+
+  function normalizeBillTime(s) {
+    var m = String(s == null ? '' : s).match(/(\d{4})\s*[-\/年.]\s*(\d{1,2})\s*[-\/月.]\s*(\d{1,2})\s*日?\s*(\d{1,2})\s*[:：]\s*(\d{2})/);
+    if (!m) return null;
+    return buildIso(+m[1], +m[2], +m[3], +m[4], +m[5]);
+  }
+
+  function parseBillCSV(text) {
+    var out = { format: null, rows: [], skipped: 0, total: 0, error: null };
+    var rows = parseCSV(text);
+    if (!rows.length) { out.error = 'empty'; return out; }
+
+    var headerIdx = -1;
+    for (var i = 0; i < Math.min(rows.length, 80); i++) {
+      var r = rows[i];
+      if (!r || !r.length) continue;
+      var first = String(r[0] || '').replace(/^\uFEFF/, '').replace(/\s/g, '');
+      if (first === '交易时间') { headerIdx = i; break; }
+    }
+    if (headerIdx < 0) { out.error = 'no-header'; return out; }
+
+    var header = rows[headerIdx].map(function (h) {
+      return String(h == null ? '' : h).replace(/^\uFEFF/, '').trim();
+    });
+    var col = function () {
+      for (var k = 0; k < arguments.length; k++) {
+        var idx = header.indexOf(arguments[k]);
+        if (idx >= 0) return idx;
+      }
+      return -1;
+    };
+
+    var iTime = col('交易时间');
+    var iDir = col('收/支');
+    var iAmt = col('金额(元)', '金额（元）', '金额');
+    var iWho = col('交易对方');
+    var iDesc = col('商品', '商品说明', '交易说明');
+    var iStat = col('当前状态', '交易状态');
+    var iWay = col('支付方式', '收/付款方式');
+
+    if (iTime < 0 || iDir < 0 || iAmt < 0) { out.error = 'columns'; return out; }
+
+    var isAlipay = header.indexOf('收/付款方式') >= 0 || header.indexOf('交易分类') >= 0 || header.indexOf('交易状态') >= 0;
+    out.format = isAlipay ? 'alipay' : 'wechat';
+
+    for (var j = headerIdx + 1; j < rows.length; j++) {
+      var row = rows[j];
+      if (!row || !row.length) continue;
+      var timeRaw = String(row[iTime] == null ? '' : row[iTime]).trim();
+      var dir = String(row[iDir] == null ? '' : row[iDir]).trim();
+      var amtRaw = String(row[iAmt] == null ? '' : row[iAmt]).trim();
+      if (!timeRaw && !dir && !amtRaw) continue;
+      out.total++;
+
+      if (dir === '不计收支' || dir === '') { out.skipped++; continue; }
+
+      var status = iStat >= 0 ? String(row[iStat] == null ? '' : row[iStat]) : '';
+      if (/(关闭|失败|撤销|取消|退款)/.test(status)) { out.skipped++; continue; }
+
+      var amount = parseFloat(amtRaw.replace(/[¥￥,\s]/g, ''));
+      if (!(amount > 0)) { out.skipped++; continue; }
+
+      var time = normalizeBillTime(timeRaw);
+      if (!time) { out.skipped++; continue; }
+
+      var who = String(row[iWho] == null ? '' : row[iWho]).trim();
+      var desc = iDesc >= 0 ? String(row[iDesc] == null ? '' : row[iDesc]).trim() : '';
+      if ((!who || who === '转账' || who === '红包') && desc) who = desc;
+      var merchant = cleanMerchant(who || desc);
+      var type = dir === '收入' ? 'income' : 'expense';
+
+      out.rows.push({
+        time: time,
+        type: type,
+        amount: round2(amount),
+        merchant: merchant,
+        desc: desc,
+        channel: isAlipay ? 'alipay' : 'wechat',
+        category: guessCategory(merchant || desc, type),
+        status: status,
+        payWay: iWay >= 0 ? String(row[iWay] == null ? '' : row[iWay]).trim() : ''
+      });
+    }
+    return out;
+  }
+
   /* ---------- 导出 ---------- */
 
   function csv(entries) {
@@ -495,6 +603,9 @@
     findDuplicate: findDuplicate,
     guessCategory: guessCategory,
     parsePaymentText: parsePaymentText,
+    parseCSV: parseCSV,
+    parseBillCSV: parseBillCSV,
+    normalizeBillTime: normalizeBillTime,
     csv: csv,
     normalizeEntry: normalizeEntry
   };

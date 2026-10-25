@@ -303,10 +303,13 @@
 
     return '<div class="sec-title">数据</div>' +
       '<div class="group">' +
+      '<button class="row" data-act="import-bill"><span>导入微信 / 支付宝账单 <span class="desc">CSV</span></span><span class="chev">›</span></button>' +
       '<button class="row" data-act="export-json"><span>导出备份 <span class="desc">JSON</span></span><span class="chev">' + backupText + ' ›</span></button>' +
       '<button class="row" data-act="export-csv"><span>导出表格 <span class="desc">CSV / Excel</span></span><span class="chev">›</span></button>' +
       '<button class="row" data-act="import"><span>导入备份</span><span class="chev">›</span></button>' +
       '</div>' +
+      '<div class="bill-note" style="margin:-8px 6px 18px">微信：我 → 服务 → 钱包 → 账单 → 常见问题 → 下载账单（用于个人对账）。' +
+      '支付宝：我的 → 账单 → 右上角 … → 开具交易流水证明。邮箱收到的是压缩包，解压出 CSV 再从这里导入。</div>' +
 
       '<div class="sec-title">记录</div>' +
       '<div class="group">' +
@@ -382,6 +385,8 @@
     $('#merchantInput').value = d.merchant || '';
     $('#timeInput').value = (d.time || C.nowLocalIso()).slice(0, 16);
     $('#saveBtn').textContent = d.editing ? '保存修改' : '保存';
+    var delBtn = $('#btnDeleteFromEdit');
+    if (delBtn) delBtn.style.display = d.editing ? 'block' : 'none';
     renderAmount();
     renderSide();
     var sheet = $('#entrySheet');
@@ -450,7 +455,7 @@
     paintEntry();
   }
 
-  function saveEntry() {
+  async function saveEntry() {
     var d = state.draft;
     if (!d) return;
     var amount = C.round2(parseFloat(d.amountStr || '0'));
@@ -482,9 +487,15 @@
     } else {
       var dup = C.findDuplicate(entries, entry, 10);
       if (dup) {
-        var okDup = window.confirm('10 分钟内已经有一笔 ¥' + C.money(dup.amount) + ' 的' + C.channelOf(dup.channel).name +
-          (dup.type === 'income' ? '收入' : '支出') + '，可能重复。仍然保存吗？');
+        var okDup = await askConfirm({
+          title: '可能重复',
+          message: '10 分钟内已经有一笔 ¥' + C.money(dup.amount) + ' 的' + C.channelOf(dup.channel).name +
+            (dup.type === 'income' ? '收入' : '支出') + '，仍然保存吗？',
+          okText: '仍然保存',
+          danger: false
+        });
         if (!okDup) return;
+        if (state.draft !== d) return;
       }
       entries.unshift(entry);
       toast('已记账 ' + (entry.type === 'income' ? '+' : '−') + '¥' + C.money(entry.amount));
@@ -714,9 +725,116 @@
     reader.readAsText(file);
   }
 
-  function clearAll() {
+  /* ---------------- 微信 / 支付宝账单导入 ---------------- */
+
+  var pendingImport = null;
+
+  function decodeBillBuffer(buf) {
+    var bytes = new Uint8Array(buf);
+    if (bytes.length > 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+      return new TextDecoder('utf-8').decode(bytes.subarray(3));
+    }
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (e) { }
+    try { return new TextDecoder('gbk').decode(bytes); } catch (e) { }
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  function handleBillFile(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var res;
+      try { res = C.parseBillCSV(decodeBillBuffer(reader.result)); }
+      catch (e) { toast('解析失败，文件可能不是 CSV'); return; }
+      if (res.error === 'no-header' || res.error === 'columns') {
+        toast('没找到账单表头，请确认是微信 / 支付宝导出的 CSV');
+        return;
+      }
+      if (!res.rows.length) { toast('没有可导入的记录'); return; }
+
+      var added = [], dup = 0;
+      res.rows.forEach(function (r) {
+        var e = C.normalizeEntry({
+          type: r.type,
+          amount: r.amount,
+          category: r.category,
+          channel: r.channel,
+          merchant: r.merchant,
+          time: r.time,
+          source: 'import'
+        });
+        if (C.findDuplicate(entries.concat(added), e, 15)) { dup++; return; }
+        added.push(e);
+      });
+
+      pendingImport = added;
+      renderBillPreview(res, added, dup);
+      openSheet('#billSheet');
+    };
+    reader.onerror = function () { toast('读取文件失败'); };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function renderBillPreview(res, added, dup) {
+    var exp = added.filter(function (a) { return a.type === 'expense'; });
+    var inc = added.filter(function (a) { return a.type === 'income'; });
+    var sum = function (arr) { return arr.reduce(function (s, e) { return s + e.amount; }, 0); };
+    var name = res.format === 'alipay' ? '支付宝账单' : '微信支付账单';
+    var times = res.rows.map(function (r) { return r.time; }).sort();
+    var rng = times.length
+      ? times[0].slice(0, 10) + ' ~ ' + times[times.length - 1].slice(0, 10)
+      : '';
+    var kv = function (k, v) {
+      return '<div class="kv"><span class="k">' + k + '</span><span class="v">' + esc(v) + '</span></div>';
+    };
+
+    $('#billSummary').innerHTML =
+      '<div class="bill-name">' + name + '<span class="sub">共 ' + res.total + ' 行</span></div>' +
+      '<div class="stat-grid">' +
+      '<div class="stat"><div class="k">将导入</div><div class="v">' + added.length + ' 笔</div></div>' +
+      '<div class="stat"><div class="k">已存在</div><div class="v">' + dup + ' 笔</div></div>' +
+      '<div class="stat"><div class="k">已忽略</div><div class="v">' + res.skipped + ' 笔</div></div>' +
+      '</div>' +
+      '<div class="group" style="margin-top:14px">' +
+      kv('支出', exp.length + ' 笔 · ¥' + C.money(sum(exp))) +
+      kv('收入', inc.length + ' 笔 · ¥' + C.money(sum(inc))) +
+      (rng ? kv('时间范围', rng) : '') +
+      '</div>' +
+      '<div class="bill-note">重复判断：同金额、同渠道、时间相差 15 分钟内视为同一笔。' +
+      '「不计收支」「已关闭」「退款」的行会自动忽略。</div>';
+
+    $('#btnDoImport').textContent = added.length ? '导入 ' + added.length + ' 笔' : '没有新记录';
+    $('#btnDoImport').disabled = !added.length;
+  }
+
+  function doImport() {
+    if (!pendingImport || !pendingImport.length) return;
+    var list = pendingImport;
+    pendingImport = null;
+    entries = entries.concat(list).sort(function (a, b) { return b.time.localeCompare(a.time); });
+    persist();
+    var latest = list.reduce(function (m, e) {
+      var k = e.time.slice(0, 7);
+      return k > m ? k : m;
+    }, list[0].time.slice(0, 7));
+    state.month = latest;
+    state.view = 'ledger';
+    state.q = '';
+    var si = $('#searchInput');
+    if (si) si.value = '';
+    $('#searchbar').classList.remove('show');
+    closeSheet('#billSheet');
+    toast('已导入 ' + list.length + ' 笔');
+    render();
+  }
+
+  async function clearAll() {
     if (!entries.length) { toast('没有记录'); return; }
-    var ok = window.confirm('确定清空全部 ' + entries.length + ' 笔记录吗？\n此操作无法撤销，建议先导出备份。');
+    var ok = await askConfirm({
+      title: '清空全部记录？',
+      message: '共 ' + entries.length + ' 笔，清空后无法恢复。建议先导出备份。',
+      okText: '清空',
+      danger: true
+    });
     if (!ok) return;
     entries = [];
     persist();
@@ -759,6 +877,37 @@
     el.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { el.classList.remove('show'); }, 2200);
+  }
+
+  /* ---------------- 自绘确认框（iOS 主屏模式下系统 confirm 会被吞掉） ---------------- */
+
+  var dlgResolve = null;
+
+  function askConfirm(opts) {
+    return new Promise(function (resolve) {
+      if (dlgResolve) { var prev = dlgResolve; dlgResolve = null; prev(false); }
+      dlgResolve = resolve;
+      $('#dlgTitle').textContent = opts.title || '确认';
+      $('#dlgMsg').textContent = opts.message || '';
+      $('#dlgOk').textContent = opts.okText || '确定';
+      $('#dlgOk').classList.toggle('danger', opts.danger !== false);
+      $('#dlgBackdrop').classList.add('show');
+      $('#dialog').classList.add('show');
+      $('#dialog').setAttribute('aria-hidden', 'false');
+    });
+  }
+
+  function closeDialog(val) {
+    $('#dlgBackdrop').classList.remove('show');
+    $('#dialog').classList.remove('show');
+    $('#dialog').setAttribute('aria-hidden', 'true');
+    var r = dlgResolve;
+    dlgResolve = null;
+    if (r) r(val);
+  }
+
+  function dialogOpen() {
+    return $('#dialog').classList.contains('show');
   }
 
   /* ---------------- 事件 ---------------- */
@@ -868,16 +1017,54 @@
       showEntry(newDraft(e));
     });
 
-    $('#btnDeleteEntry').addEventListener('click', function () {
+    $('#btnDeleteEntry').addEventListener('click', async function () {
       var e = findEntry(state.detailId);
       if (!e) return;
-      if (!window.confirm('删除这笔 ¥' + C.money(e.amount) + ' 的记录？')) return;
+      var ok = await askConfirm({
+        title: '删除这笔记录？',
+        message: '¥' + C.money(e.amount) + ' · ' + (e.merchant || C.catOf(e.type, e.category).name) + '，删除后无法恢复。',
+        okText: '删除',
+        danger: true
+      });
+      if (!ok) return;
       entries = entries.filter(function (x) { return x.id !== e.id; });
       persist();
       closeSheet('#detailSheet');
       toast('已删除');
       render();
     });
+
+    $('#btnDeleteFromEdit').addEventListener('click', async function () {
+      var d = state.draft;
+      if (!d || !d.id) return;
+      var e = findEntry(d.id);
+      if (!e) return;
+      var ok = await askConfirm({
+        title: '删除这笔记录？',
+        message: '¥' + C.money(e.amount) + '，删除后无法恢复。',
+        okText: '删除',
+        danger: true
+      });
+      if (!ok) return;
+      entries = entries.filter(function (x) { return x.id !== e.id; });
+      persist();
+      state.draft = null;
+      closeSheet('#entrySheet');
+      toast('已删除');
+      render();
+    });
+
+    $('#dlgOk').addEventListener('click', function () { closeDialog(true); });
+    $('#dlgCancel').addEventListener('click', function () { closeDialog(false); });
+    $('#dlgBackdrop').addEventListener('click', function () { closeDialog(false); });
+
+    $('#billFile').addEventListener('change', function () {
+      var f = this.files && this.files[0];
+      this.value = '';
+      if (f) handleBillFile(f);
+    });
+
+    $('#btnDoImport').addEventListener('click', doImport);
 
     $('#importFile').addEventListener('change', function () {
       var f = this.files && this.files[0];
@@ -896,6 +1083,7 @@
       else if (act === 'export-json') exportJSON();
       else if (act === 'export-csv') exportCSV();
       else if (act === 'import') $('#importFile').click();
+      else if (act === 'import-bill') $('#billFile').click();
       else if (act === 'clear') clearAll();
     });
 
@@ -904,9 +1092,9 @@
     }, { passive: true });
 
     document.addEventListener('keydown', function (ev) {
-      if (ev.key === 'Escape' && openSheets.length) {
-        closeSheet(openSheets[openSheets.length - 1]);
-      }
+      if (ev.key !== 'Escape') return;
+      if (dialogOpen()) { closeDialog(false); return; }
+      if (openSheets.length) closeSheet(openSheets[openSheets.length - 1]);
     });
   }
 

@@ -92,6 +92,7 @@
 
   <div class="save-wrap">
     <button class="btn primary" id="saveBtn">保存</button>
+    <button class="btn danger" id="btnDeleteFromEdit" style="display:none">删除这笔</button>
   </div>
 </section>
 
@@ -129,8 +130,38 @@
 </section>
 
 <div class="toast" id="toast"></div>
+
+<!-- ============ 账单导入 ============ -->
+<section class="sheet" id="billSheet" aria-hidden="true">
+  <div class="grip"></div>
+  <div class="sheet-head">
+    <h2>导入账单</h2>
+    <button class="close" data-close>取消</button>
+  </div>
+  <div id="billSummary"></div>
+  <div class="save-wrap">
+    <button class="btn primary" id="btnDoImport">导入</button>
+  </div>
+</section>
+
+<!-- ============ 确认框 ============ -->
+<div class="dlg-backdrop" id="dlgBackdrop"></div>
+<div class="dialog" id="dialog" aria-hidden="true">
+  <div class="dlg-card">
+    <div class="dlg-title" id="dlgTitle">确认</div>
+    <div class="dlg-msg" id="dlgMsg"></div>
+  </div>
+  <div class="dlg-card">
+    <button class="dlg-btn danger" id="dlgOk">确定</button>
+  </div>
+  <div class="dlg-card">
+    <button class="dlg-btn" id="dlgCancel">取消</button>
+  </div>
+</div>
+
 <input type="file" id="ocrFile" accept="image/*" hidden>
 <input type="file" id="importFile" accept=".json,application/json" hidden>
+<input type="file" id="billFile" accept=".csv,text/csv,text/plain" hidden>
 
 <script src="core.js"></script>
 <script src="app.js"></script>
