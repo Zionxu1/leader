@@ -471,11 +471,186 @@
     return rows;
   }
 
-  function normalizeBillTime(s) {
-    var m = String(s == null ? '' : s).match(/(\d{4})\s*[-\/年.]\s*(\d{1,2})\s*[-\/月.]\s*(\d{1,2})\s*日?\s*(\d{1,2})\s*[:：]\s*(\d{2})/);
-    if (!m) return null;
-    return buildIso(+m[1], +m[2], +m[3], +m[4], +m[5]);
+  function excelSerialIso(n) {
+    var days = Math.floor(n);
+    var frac = n - days;
+    var d = new Date(1899, 11, 30);
+    d.setDate(d.getDate() + days);
+    d.setHours(0, 0, 0, 0);
+    d.setMinutes(Math.round(frac * 1440));
+    return isoFromDate(d);
   }
+
+  function normalizeBillTime(s) {
+    var str = String(s == null ? '' : s).trim();
+    var m = str.match(/(\d{4})\s*[-\/年.]\s*(\d{1,2})\s*[-\/月.]\s*(\d{1,2})\s*日?\s*(\d{1,2})\s*[:：]\s*(\d{2})/);
+    if (m) return buildIso(+m[1], +m[2], +m[3], +m[4], +m[5]);
+    m = str.match(/^(\d{4})\s*[-\/年.]\s*(\d{1,2})\s*[-\/月.]\s*(\d{1,2})\s*日?$/);
+    if (m) return buildIso(+m[1], +m[2], +m[3], 0, 0);
+    var n = parseFloat(str.replace(/[,\s]/g, ''));
+    if (isFinite(n) && n > 20000 && n < 80000) return excelSerialIso(n);
+    return null;
+  }
+
+  /* ---------- 表格文件（xlsx / html-xls / csv） ---------- */
+
+  function rowsToCSV(rows) {
+    var esc = function (v) {
+      var s = String(v == null ? '' : v);
+      if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    };
+    return (rows || []).map(function (r) { return (r || []).map(esc).join(','); }).join('\r\n');
+  }
+
+  function htmlTableToRows(html) {
+    var doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+    var tables = doc.getElementsByTagName('table');
+    var best = null, bestCount = 0;
+    for (var i = 0; i < tables.length; i++) {
+      var n = tables[i].getElementsByTagName('tr').length;
+      if (n > bestCount) { bestCount = n; best = tables[i]; }
+    }
+    if (!best) return [];
+    var trs = best.getElementsByTagName('tr');
+    var out = [];
+    for (var r = 0; r < trs.length; r++) {
+      var tds = trs[r].getElementsByTagName('td');
+      if (!tds.length) tds = trs[r].getElementsByTagName('th');
+      var row = [];
+      for (var c = 0; c < tds.length; c++) row.push(tds[c].textContent.replace(/\s+/g, ' ').trim());
+      if (row.length) out.push(row);
+    }
+    return out;
+  }
+
+  async function inflateRaw(bytes) {
+    if (typeof DecompressionStream === 'undefined') throw new Error('no inflate');
+    var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async function unzip(bytes) {
+    var u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    var dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    var eocd = -1;
+    var limit = Math.max(0, u8.length - 66000);
+    for (var i = u8.length - 22; i >= limit; i--) {
+      if (u8[i] === 0x50 && u8[i + 1] === 0x4b && u8[i + 2] === 0x05 && u8[i + 3] === 0x06) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error('not a zip');
+    var count = dv.getUint16(eocd + 10, true);
+    var cdOffset = dv.getUint32(eocd + 16, true);
+    var entries = {};
+    var p = cdOffset;
+    for (var k = 0; k < count; k++) {
+      if (p + 46 > u8.length || dv.getUint32(p, true) !== 0x02014b50) break;
+      var method = dv.getUint16(p + 10, true);
+      var compSize = dv.getUint32(p + 20, true);
+      var nameLen = dv.getUint16(p + 28, true);
+      var extraLen = dv.getUint16(p + 30, true);
+      var commentLen = dv.getUint16(p + 32, true);
+      var localOff = dv.getUint32(p + 42, true);
+      var name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
+      entries[name] = { method: method, compSize: compSize, localOff: localOff };
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+
+    var read = async function (name) {
+      var e = entries[name];
+      if (!e) return null;
+      if (dv.getUint32(e.localOff, true) !== 0x04034b50) return null;
+      var nl = dv.getUint16(e.localOff + 26, true);
+      var el = dv.getUint16(e.localOff + 28, true);
+      var start = e.localOff + 30 + nl + el;
+      var raw = u8.subarray(start, start + e.compSize);
+      if (e.method === 0) return raw;
+      if (e.method === 8) return await inflateRaw(raw);
+      return null;
+    };
+
+    return { names: Object.keys(entries), read: read };
+  }
+
+  async function xlsxToRows(bytes) {
+    var zip = await unzip(bytes);
+    var dec = new TextDecoder();
+
+    var sharedRaw = await zip.read('xl/sharedStrings.xml');
+    var shared = [];
+    if (sharedRaw) {
+      var sdoc = new DOMParser().parseFromString(dec.decode(sharedRaw), 'application/xml');
+      var sis = sdoc.getElementsByTagName('si');
+      for (var i = 0; i < sis.length; i++) {
+        var ts = sis[i].getElementsByTagName('t');
+        var s = '';
+        for (var j = 0; j < ts.length; j++) s += ts[j].textContent;
+        shared.push(s);
+      }
+    }
+
+    var sheetName = 'xl/worksheets/sheet1.xml';
+    if (zip.names.indexOf(sheetName) < 0) {
+      for (var n = 0; n < zip.names.length; n++) {
+        if (/^xl\/worksheets\/.*\.xml$/.test(zip.names[n])) { sheetName = zip.names[n]; break; }
+      }
+    }
+    var sheetRaw = await zip.read(sheetName);
+    if (!sheetRaw) throw new Error('no sheet');
+    var doc = new DOMParser().parseFromString(dec.decode(sheetRaw), 'application/xml');
+
+    var colIndex = function (ref) {
+      var letters = String(ref || '').replace(/[^A-Z]/g, '');
+      var idx = 0;
+      for (var i = 0; i < letters.length; i++) idx = idx * 26 + (letters.charCodeAt(i) - 64);
+      return idx - 1;
+    };
+
+    var rows = [];
+    var rowEls = doc.getElementsByTagName('row');
+    for (var r = 0; r < rowEls.length; r++) {
+      var cells = rowEls[r].getElementsByTagName('c');
+      var row = [];
+      for (var c = 0; c < cells.length; c++) {
+        var cell = cells[c];
+        var idx = colIndex(cell.getAttribute('r'));
+        if (idx < 0) idx = row.length;
+        var type = cell.getAttribute('t');
+        var vEl = cell.getElementsByTagName('v')[0];
+        var val = '';
+        if (type === 's') {
+          val = vEl ? (shared[parseInt(vEl.textContent, 10)] || '') : '';
+        } else if (type === 'inlineStr') {
+          var isEl = cell.getElementsByTagName('t')[0];
+          val = isEl ? isEl.textContent : '';
+        } else {
+          val = vEl ? vEl.textContent : '';
+        }
+        while (row.length < idx) row.push('');
+        row[idx] = String(val).trim();
+      }
+      if (row.length) rows.push(row);
+    }
+    return rows;
+  }
+
+  /* ---------- 账单表格解析（微信 / 支付宝 / 银行） ---------- */
+
+  var TIME_COLS = ['交易时间', '交易日期', '记账时间', '记账日期', '发生时间', '发生日期', '入账日期', '日期', '时间'];
+  var AMT_COLS = ['金额(元)', '金额（元）', '金额', '交易金额', '发生额', '交易额', '收入金额', '支出金额', '贷方金额', '借方金额', '收入', '支出'];
+  var DIR_COLS = ['收/支', '收付标志', '借贷标志', '借贷', '交易方向', '收支', '收支方向'];
+
+  function normHeader(s) {
+    return String(s == null ? '' : s).replace(/^\uFEFF/, '').replace(/[\s\u3000]/g, '').trim();
+  }
+
+  var BILL_CATS = {
+    '餐饮美食': 'food', '交通出行': 'transport', '日用百货': 'daily', '服饰装扮': 'shopping',
+    '数码电器': 'shopping', '文化休闲': 'fun', '医疗健康': 'health', '住房物业': 'home',
+    '通讯缴费': 'telecom', '充值缴费': 'telecom', '教育培训': 'study', '转账红包': 'social',
+    '商业服务': 'other', '投资理财': 'other', '信用借还': 'other', '保险': 'other',
+    '酒店旅游': 'fun', '运动户外': 'fun', '美容美发': 'daily', '母婴亲子': 'shopping'
+  };
 
   function parseBillCSV(text) {
     var out = { format: null, rows: [], skipped: 0, total: 0, error: null };
@@ -483,17 +658,17 @@
     if (!rows.length) { out.error = 'empty'; return out; }
 
     var headerIdx = -1;
-    for (var i = 0; i < Math.min(rows.length, 80); i++) {
+    var header = null;
+    for (var i = 0; i < Math.min(rows.length, 100); i++) {
       var r = rows[i];
       if (!r || !r.length) continue;
-      var first = String(r[0] || '').replace(/^\uFEFF/, '').replace(/\s/g, '');
-      if (first === '交易时间') { headerIdx = i; break; }
+      var names = r.map(normHeader);
+      var hasTime = names.some(function (n) { return TIME_COLS.indexOf(n) >= 0; });
+      var hasAmt = names.some(function (n) { return AMT_COLS.indexOf(n) >= 0; });
+      if (hasTime && hasAmt) { headerIdx = i; header = names; break; }
     }
     if (headerIdx < 0) { out.error = 'no-header'; return out; }
 
-    var header = rows[headerIdx].map(function (h) {
-      return String(h == null ? '' : h).replace(/^\uFEFF/, '').trim();
-    });
     var col = function () {
       for (var k = 0; k < arguments.length; k++) {
         var idx = header.indexOf(arguments[k]);
@@ -502,44 +677,72 @@
       return -1;
     };
 
-    var iTime = col('交易时间');
-    var iDir = col('收/支');
-    var iAmt = col('金额(元)', '金额（元）', '金额');
-    var iWho = col('交易对方');
-    var iDesc = col('商品', '商品说明', '交易说明');
-    var iStat = col('当前状态', '交易状态');
+    var iTime = col.apply(null, TIME_COLS);
+    var iDir = col.apply(null, DIR_COLS);
+    var iAmt = col('金额(元)', '金额（元）', '金额', '交易金额', '发生额', '交易额');
+    var iInc = col('收入金额', '贷方金额', '收入');
+    var iExp = col('支出金额', '借方金额', '支出');
+    var iDate = col('交易日期', '记账日期', '发生日期', '入账日期', '日期');
+    var iClock = col('交易时间', '时间');
+    var combineTime = iDate >= 0 && iClock >= 0 && iDate !== iClock;
+    var iWho = col('交易对方', '对方户名', '对方名称', '商户名称', '收款方', '对方');
+    var iDesc = col('商品', '商品说明', '交易说明', '摘要', '交易摘要', '用途', '备注');
+    var iStat = col('当前状态', '交易状态', '状态');
     var iWay = col('支付方式', '收/付款方式');
+    var iCat = col('交易分类', '交易类型');
 
-    if (iTime < 0 || iDir < 0 || iAmt < 0) { out.error = 'columns'; return out; }
+    if (iTime < 0 || (iAmt < 0 && iInc < 0 && iExp < 0)) { out.error = 'columns'; return out; }
 
-    var isAlipay = header.indexOf('收/付款方式') >= 0 || header.indexOf('交易分类') >= 0 || header.indexOf('交易状态') >= 0;
-    out.format = isAlipay ? 'alipay' : 'wechat';
+    var isAlipay = header.indexOf('收/付款方式') >= 0 || header.indexOf('交易分类') >= 0;
+    var isWechat = header.indexOf('当前状态') >= 0 && header.indexOf('支付方式') >= 0;
+    out.format = isAlipay ? 'alipay' : isWechat ? 'wechat' : 'bank';
+
+    var cell = function (row, idx) {
+      return idx >= 0 && row[idx] != null ? String(row[idx]).trim() : '';
+    };
+    var money = function (s) {
+      return parseFloat(String(s).replace(/[¥￥,，\s]/g, '')) || 0;
+    };
 
     for (var j = headerIdx + 1; j < rows.length; j++) {
       var row = rows[j];
       if (!row || !row.length) continue;
-      var timeRaw = String(row[iTime] == null ? '' : row[iTime]).trim();
-      var dir = String(row[iDir] == null ? '' : row[iDir]).trim();
-      var amtRaw = String(row[iAmt] == null ? '' : row[iAmt]).trim();
+      var timeRaw = combineTime
+        ? (cell(row, iDate) + ' ' + cell(row, iClock)).trim()
+        : cell(row, iTime);
+      var dir = cell(row, iDir);
+      var amtRaw = cell(row, iAmt);
       if (!timeRaw && !dir && !amtRaw) continue;
       out.total++;
 
-      if (dir === '不计收支' || dir === '') { out.skipped++; continue; }
+      if (dir === '不计收支' || /不计|中性|^\/$|^其他$/.test(dir)) { out.skipped++; continue; }
 
-      var status = iStat >= 0 ? String(row[iStat] == null ? '' : row[iStat]) : '';
-      if (/(关闭|失败|撤销|取消|退款)/.test(status)) { out.skipped++; continue; }
-
-      var amount = parseFloat(amtRaw.replace(/[¥￥,\s]/g, ''));
+      var amount = amtRaw ? money(amtRaw) : 0;
+      if (!(amount > 0) && (iInc >= 0 || iExp >= 0)) {
+        var inc = iInc >= 0 ? money(cell(row, iInc)) : 0;
+        var exp = iExp >= 0 ? money(cell(row, iExp)) : 0;
+        if (inc > 0) { amount = inc; dir = dir || '收入'; }
+        else if (exp > 0) { amount = exp; dir = dir || '支出'; }
+      }
       if (!(amount > 0)) { out.skipped++; continue; }
+
+      var status = cell(row, iStat);
+      if (/(关闭|失败|撤销|取消|退款|冲正)/.test(status)) { out.skipped++; continue; }
 
       var time = normalizeBillTime(timeRaw);
       if (!time) { out.skipped++; continue; }
 
-      var who = String(row[iWho] == null ? '' : row[iWho]).trim();
-      var desc = iDesc >= 0 ? String(row[iDesc] == null ? '' : row[iDesc]).trim() : '';
+      var type;
+      if (/收入|贷方|转入|^贷$/.test(dir)) type = 'income';
+      else if (/支出|借方|转出|^借$/.test(dir)) type = 'expense';
+      else type = 'expense';
+
+      var who = cell(row, iWho);
+      var desc = cell(row, iDesc);
       if ((!who || who === '转账' || who === '红包') && desc) who = desc;
       var merchant = cleanMerchant(who || desc);
-      var type = dir === '收入' ? 'income' : 'expense';
+      var billCat = cell(row, iCat);
+      var category = BILL_CATS[billCat] || guessCategory(merchant || desc, type);
 
       out.rows.push({
         time: time,
@@ -547,10 +750,10 @@
         amount: round2(amount),
         merchant: merchant,
         desc: desc,
-        channel: isAlipay ? 'alipay' : 'wechat',
-        category: guessCategory(merchant || desc, type),
+        channel: isAlipay ? 'alipay' : isWechat ? 'wechat' : 'bankcard',
+        category: category,
         status: status,
-        payWay: iWay >= 0 ? String(row[iWay] == null ? '' : row[iWay]).trim() : ''
+        payWay: cell(row, iWay)
       });
     }
     return out;
@@ -639,6 +842,10 @@
     parseCSV: parseCSV,
     parseBillCSV: parseBillCSV,
     normalizeBillTime: normalizeBillTime,
+    rowsToCSV: rowsToCSV,
+    htmlTableToRows: htmlTableToRows,
+    xlsxToRows: xlsxToRows,
+    unzip: unzip,
     csv: csv,
     normalizeEntry: normalizeEntry
   };

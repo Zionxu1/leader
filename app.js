@@ -317,7 +317,7 @@
 
     return '<div class="sec-title">数据</div>' +
       '<div class="group">' +
-      '<button class="row" data-act="import-bill"><span>导入微信 / 支付宝账单 <span class="desc">CSV</span></span><span class="chev">›</span></button>' +
+      '<button class="row" data-act="import-bill"><span>导入账单 <span class="desc">微信 / 支付宝 / 银行</span></span><span class="chev">CSV·Excel ›</span></button>' +
       '<button class="row" data-act="export-json"><span>导出备份 <span class="desc">JSON</span></span><span class="chev">' + backupText + ' ›</span></button>' +
       '<button class="row" data-act="export-csv"><span>导出表格 <span class="desc">CSV / Excel</span></span><span class="chev">›</span></button>' +
       '<button class="row" data-act="import"><span>导入备份</span><span class="chev">›</span></button>' +
@@ -975,14 +975,27 @@
     return new TextDecoder('utf-8').decode(bytes);
   }
 
+  async function readBillFile(file) {
+    var buf = new Uint8Array(await file.arrayBuffer());
+    if (buf.length > 1 && buf[0] === 0x50 && buf[1] === 0x4b) {
+      var rows = await C.xlsxToRows(buf);
+      return C.rowsToCSV(rows);
+    }
+    if (buf.length > 4 && buf[0] === 0xD0 && buf[1] === 0xCF && buf[2] === 0x11 && buf[3] === 0xE0) {
+      throw new Error('old-xls');
+    }
+    var text = decodeBillBuffer(buf.buffer);
+    if (/^\s*</.test(text) && /<table/i.test(text)) return C.rowsToCSV(C.htmlTableToRows(text));
+    return text;
+  }
+
   function handleBillFile(file) {
-    var reader = new FileReader();
-    reader.onload = function () {
+    readBillFile(file).then(function (text) {
       var res;
-      try { res = C.parseBillCSV(decodeBillBuffer(reader.result)); }
-      catch (e) { toast('解析失败，文件可能不是 CSV'); return; }
+      try { res = C.parseBillCSV(text); }
+      catch (e) { toast('解析失败，文件可能不是表格'); return; }
       if (res.error === 'no-header' || res.error === 'columns') {
-        toast('没找到账单表头，请确认是微信 / 支付宝导出的 CSV');
+        toast('没找到「时间 / 金额」这类表头，请确认是微信 / 支付宝 / 银行的流水');
         return;
       }
       if (!res.rows.length) { toast('没有可导入的记录'); return; }
@@ -1005,16 +1018,18 @@
       pendingImport = added;
       renderBillPreview(res, added, dup);
       openSheet('#billSheet');
-    };
-    reader.onerror = function () { toast('读取文件失败'); };
-    reader.readAsArrayBuffer(file);
+    }).catch(function (err) {
+      if (err && err.message === 'old-xls') toast('这是旧版 .xls，请在 Excel 里另存为 .xlsx 或 .csv');
+      else if (err && err.message === 'no inflate') toast('这台手机的系统版本读不了 Excel，请另存为 CSV 再导入');
+      else toast('读不了这个文件，试试另存为 .xlsx 或 .csv');
+    });
   }
 
   function renderBillPreview(res, added, dup) {
     var exp = added.filter(function (a) { return a.type === 'expense'; });
     var inc = added.filter(function (a) { return a.type === 'income'; });
     var sum = function (arr) { return arr.reduce(function (s, e) { return s + e.amount; }, 0); };
-    var name = res.format === 'alipay' ? '支付宝账单' : '微信支付账单';
+    var name = res.format === 'alipay' ? '支付宝账单' : res.format === 'wechat' ? '微信支付账单' : '银行 / 其它流水';
     var times = res.rows.map(function (r) { return r.time; }).sort();
     var rng = times.length
       ? times[0].slice(0, 10) + ' ~ ' + times[times.length - 1].slice(0, 10)
