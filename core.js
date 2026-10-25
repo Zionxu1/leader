@@ -653,7 +653,7 @@
   };
 
   function parseBillCSV(text) {
-    var out = { format: null, rows: [], skipped: 0, total: 0, error: null };
+    var out = { format: null, rows: [], skipped: 0, total: 0, error: null, skip: { neutral: 0, zero: 0, closed: 0, badtime: 0 } };
     var rows = parseCSV(text);
     if (!rows.length) { out.error = 'empty'; return out; }
 
@@ -715,7 +715,7 @@
       if (!timeRaw && !dir && !amtRaw) continue;
       out.total++;
 
-      if (dir === '不计收支' || /不计|中性|^\/$|^其他$/.test(dir)) { out.skipped++; continue; }
+      if (dir === '不计收支' || /不计|中性|^\/$|^其他$/.test(dir)) { out.skipped++; out.skip.neutral++; continue; }
 
       var amount = amtRaw ? money(amtRaw) : 0;
       if (!(amount > 0) && (iInc >= 0 || iExp >= 0)) {
@@ -724,13 +724,13 @@
         if (inc > 0) { amount = inc; dir = dir || '收入'; }
         else if (exp > 0) { amount = exp; dir = dir || '支出'; }
       }
-      if (!(amount > 0)) { out.skipped++; continue; }
+      if (!(amount > 0)) { out.skipped++; out.skip.zero++; continue; }
 
       var status = cell(row, iStat);
-      if (/(关闭|失败|撤销|取消|退款|冲正)/.test(status)) { out.skipped++; continue; }
+      if (/(关闭|失败|撤销|取消|冲正)/.test(status)) { out.skipped++; out.skip.closed++; continue; }
 
       var time = normalizeBillTime(timeRaw);
-      if (!time) { out.skipped++; continue; }
+      if (!time) { out.skipped++; out.skip.badtime++; continue; }
 
       var type;
       if (/收入|贷方|转入|^贷$/.test(dir)) type = 'income';

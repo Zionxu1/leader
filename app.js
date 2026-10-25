@@ -1038,6 +1038,14 @@
       return '<div class="kv"><span class="k">' + k + '</span><span class="v">' + esc(v) + '</span></div>';
     };
 
+    var parts = [];
+    if (res.skip) {
+      if (res.skip.neutral) parts.push('不计收支 ' + res.skip.neutral);
+      if (res.skip.closed) parts.push('已关闭 ' + res.skip.closed);
+      if (res.skip.zero) parts.push('金额 0 ' + res.skip.zero);
+      if (res.skip.badtime) parts.push('时间异常 ' + res.skip.badtime);
+    }
+
     $('#billSummary').innerHTML =
       '<div class="bill-name">' + name + '<span class="sub">共 ' + res.total + ' 行</span></div>' +
       '<div class="stat-grid">' +
@@ -1049,9 +1057,10 @@
       kv('支出', exp.length + ' 笔 · ¥' + C.money(sum(exp))) +
       kv('收入', inc.length + ' 笔 · ¥' + C.money(sum(inc))) +
       (rng ? kv('时间范围', rng) : '') +
+      (parts.length ? kv('忽略原因', parts.join(' · ')) : '') +
       '</div>' +
-      '<div class="bill-note">重复判断：同金额、同渠道、时间相差 15 分钟内视为同一笔。' +
-      '「不计收支」「已关闭」「退款」的行会自动忽略。</div>';
+      '<div class="bill-note">退款会照原样记一笔收入，和账单金额保持一致；' +
+      '重复判断为同金额、同渠道、时间相差 15 分钟内。</div>';
 
     $('#btnDoImport').textContent = added.length ? '导入 ' + added.length + ' 笔' : '没有新记录';
     $('#btnDoImport').disabled = !added.length;
